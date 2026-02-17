@@ -1,3 +1,27 @@
+"""
+run_styleid.py — ControlNet-integrated version
+
+This file is a MODIFIED version of the original run_styleid.py.
+Changes are marked with "# ===== CONTROLNET =====" comments.
+
+To use: replace the original run_styleid.py with this file, and place
+controlnet_utils.py, controlnet_patch.py, controlnet_ddim_patch.py
+in the same directory (root of the StyleID repo).
+
+Usage:
+  # Original StyleID (unchanged behavior):
+  python run_styleid.py --cnt data/cnt --sty data/sty
+
+  # StyleID + ControlNet depth guidance:
+  python run_styleid.py --cnt data/cnt --sty data/sty --controlnet depth --cn_scale 1.0
+
+  # Lower ControlNet influence:
+  python run_styleid.py --cnt data/cnt --sty data/sty --controlnet depth --cn_scale 0.5
+
+  # Save depth maps for inspection:
+  python run_styleid.py --cnt data/cnt --sty data/sty --controlnet depth --save_condition
+"""
+
 import argparse, os
 import torch
 import numpy as np
@@ -62,6 +86,16 @@ def load_img(path):
     image = torch.from_numpy(image)
     return 2.*image - 1.
 
+# ===== CONTROLNET: helper to load content image as numpy for condition extraction =====
+def load_img_numpy(path):
+    """Load image as uint8 RGB numpy array, center-cropped and resized to 512x512."""
+    image = Image.open(path).convert("RGB")
+    x, y = image.size
+    image = transforms.CenterCrop(min(x, y))(image)
+    image = image.resize((512, 512), resample=Image.Resampling.LANCZOS)
+    return np.array(image)
+# ===== END CONTROLNET =====
+
 def adain(cnt_feat, sty_feat):
     cnt_mean = cnt_feat.mean(dim=[0, 2, 3],keepdim=True)
     cnt_std = cnt_feat.std(dim=[0, 2, 3],keepdim=True)
@@ -111,6 +145,21 @@ def main():
     parser.add_argument('--output_path', type=str, default='output')
     parser.add_argument("--without_init_adain", action='store_true')
     parser.add_argument("--without_attn_injection", action='store_true')
+
+    # ===== CONTROLNET: new arguments =====
+    parser.add_argument('--controlnet', type=str, default=None,
+                        choices=['depth', 'canny', 'normal', 'seg', 'hed'],
+                        help='ControlNet condition type. None = disabled (original StyleID).')
+    parser.add_argument('--cn_scale', type=float, default=1.0,
+                        help='ControlNet conditioning scale (0.0 to 2.0)')
+    parser.add_argument('--cn_model', type=str, default=None,
+                        help='Custom ControlNet model ID (overrides default for condition type)')
+    parser.add_argument('--cn_version', type=str, default='1.0', choices=['1.0', '1.1'],
+                        help='ControlNet version (1.0 or 1.1)')
+    parser.add_argument('--save_condition', action='store_true',
+                        help='Save extracted condition maps (e.g., depth maps) to output dir')
+    # ===== END CONTROLNET =====
+
     opt = parser.parse_args()
 
     feat_path_root = opt.precomputed
@@ -123,6 +172,25 @@ def main():
     
     model_config = OmegaConf.load(f"{opt.model_config}")
     model = load_model_from_config(model_config, f"{opt.ckpt}")
+
+    # ===== CONTROLNET: patch model if ControlNet is enabled =====
+    cn_wrapper = None
+    if opt.controlnet is not None:
+        from controlnet_utils import ControlNetWrapper, extract_condition, get_controlnet_model_id
+        from controlnet_patch import patch_unet_for_controlnet, patch_diffusion_wrapper, patch_apply_model
+        from controlnet_ddim_patch import patch_ddim_for_controlnet, unpatch_ddim
+
+        # Patch the UNet and model to accept ControlNet residuals
+        patch_unet_for_controlnet(model.model.diffusion_model)
+        patch_diffusion_wrapper(model)
+        patch_apply_model(model)
+
+        # Load ControlNet
+        cn_model_id = opt.cn_model or get_controlnet_model_id(opt.controlnet, opt.cn_version)
+        cn_wrapper = ControlNetWrapper(cn_model_id, device="cuda", dtype=torch.float16)
+
+        print(f"[ControlNet] Enabled: {opt.controlnet}, scale={opt.cn_scale}, model={cn_model_id}")
+    # ===== END CONTROLNET =====
 
     self_attn_output_block_indices = list(map(int, opt.attn_layer.split(',')))
     ddim_inversion_steps = opt.ddim_inv_steps
@@ -226,6 +294,28 @@ def main():
                 cnt_feat = copy.deepcopy(feat_maps)
                 cnt_z_enc = feat_maps[0]['z_enc']
 
+            # ===== CONTROLNET: extract condition and prepare tensor =====
+            cn_cond_tensor = None
+            if cn_wrapper is not None:
+                cnt_img_np = load_img_numpy(cnt_name_)
+                condition_image = extract_condition(cnt_img_np, opt.controlnet, device="cuda")
+
+                if opt.save_condition:
+                    cond_dir = os.path.join(output_path, "conditions")
+                    os.makedirs(cond_dir, exist_ok=True)
+                    cond_fname = f"{os.path.basename(cnt_name).split('.')[0]}_{opt.controlnet}.png"
+                    condition_image.save(os.path.join(cond_dir, cond_fname))
+
+                cn_cond_tensor = cn_wrapper.prepare_condition(condition_image)
+
+                # Patch the DDIM sampler for this content image
+                patch_ddim_for_controlnet(
+                    sampler, cn_wrapper, cn_cond_tensor,
+                    conditioning_scale=opt.cn_scale,
+                    text_embeddings=uc,
+                )
+            # ===== END CONTROLNET =====
+
             with torch.no_grad():
                 with precision_scope("cuda"):
                     with model.ema_scope():
@@ -241,7 +331,7 @@ def main():
                         if opt.without_attn_injection:
                             feat_maps = None
 
-                        # inference
+                        # inference (ControlNet is active in sampler.sample via patched p_sample_ddim)
                         samples_ddim, intermediates = sampler.sample(S=ddim_steps,
                                                         batch_size=1,
                                                         shape=shape,
@@ -269,6 +359,11 @@ def main():
                             if not os.path.isfile(sty_feat_name):
                                 with open(sty_feat_name, 'wb') as h:
                                     pickle.dump(sty_feat, h)
+
+            # ===== CONTROLNET: unpatch after each content image =====
+            if cn_wrapper is not None:
+                unpatch_ddim(sampler)
+            # ===== END CONTROLNET =====
 
     print(f"Total end: {time.time() - begin}")
 
