@@ -793,9 +793,13 @@ class UNetModel(nn.Module):
                 out_layers_injected = injected_features[out_layers_feature_key]
 
             if injected_features is not None:
-                injection_config = injected_features[config_key]
+                injection_config = injected_features[config_key].copy()
                 if t_scale_key in injected_features:
                     injection_config['T'] = injected_features[t_scale_key]
+                # Use layer-specific gamma if available
+                gamma_per_layer = injection_config.get('gamma_per_layer')
+                if gamma_per_layer is not None and module_i in gamma_per_layer:
+                    injection_config['gamma'] = gamma_per_layer[module_i]
 
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h,

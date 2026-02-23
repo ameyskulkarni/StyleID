@@ -33,6 +33,7 @@ def feat_merge(opt, cnt_feats, sty_feats, start_step=0):
                 'gamma':opt.gamma,
                 'T':opt.T,
                 'timestep':_,
+                'gamma_per_layer': opt.gamma_per_layer_values,
                 }} for _ in range(50)]
 
     for i in range(len(feat_maps)):
@@ -103,6 +104,9 @@ def main():
     parser.add_argument('--f', type=int, default=8, help='downsampling factor')
     parser.add_argument('--T', type=float, default=1.5, help='attention temperature scaling hyperparameter')
     parser.add_argument('--gamma', type=float, default=0.75, help='query preservation hyperparameter')
+    parser.add_argument('--gamma_per_layer', type=str, default=None,
+                       help='Layer-wise gamma values as comma-separated list (6 values for layers 6-11). '
+                            'Example: 0.5,0.5,0.5,0.9,0.9,0.9. If not specified, uses global --gamma for all layers.')
     parser.add_argument("--attn_layer", type=str, default='6,7,8,9,10,11', help='injection attention feature layers')
     parser.add_argument('--model_config', type=str, default='models/ldm/stable-diffusion-v1/v1-inference.yaml', help='model config')
     parser.add_argument('--precomputed', type=str, default='./precomputed_feats', help='save path for precomputed feature')
@@ -112,6 +116,35 @@ def main():
     parser.add_argument("--without_init_adain", action='store_true')
     parser.add_argument("--without_attn_injection", action='store_true')
     opt = parser.parse_args()
+
+    # Parse and validate gamma_per_layer
+    if opt.gamma_per_layer is not None:
+        try:
+            gamma_list = [float(x.strip()) for x in opt.gamma_per_layer.split(',')]
+            if len(gamma_list) != 6:
+                raise ValueError(f"Expected 6 gamma values for layers 6-11, got {len(gamma_list)}")
+            if not all(0.0 <= g <= 1.0 for g in gamma_list):
+                raise ValueError("All gamma values must be between 0.0 and 1.0")
+            opt.gamma_per_layer_values = {
+                6: gamma_list[0],
+                7: gamma_list[1],
+                8: gamma_list[2],
+                9: gamma_list[3],
+                10: gamma_list[4],
+                11: gamma_list[5],
+            }
+            print("\n" + "=" * 45)
+            print("Layer-wise Gamma Configuration:")
+            for i, gamma in enumerate(gamma_list):
+                print(f"  Layer {6 + i}: {gamma:.2f}")
+            print("=" * 45 + "\n")
+        except Exception as e:
+            print(f"Error parsing --gamma_per_layer: {e}")
+            print(f"Falling back to global --gamma={opt.gamma}")
+            opt.gamma_per_layer_values = None
+    else:
+        opt.gamma_per_layer_values = None
+        print(f"\nUsing global gamma = {opt.gamma:.2f} for all layers\n")
 
     feat_path_root = opt.precomputed
 
@@ -146,7 +179,8 @@ def main():
     global feat_maps
     feat_maps = [{'config': {
                 'gamma':opt.gamma,
-                'T':opt.T
+                'T':opt.T,
+                'gamma_per_layer': opt.gamma_per_layer_values,
                 }} for _ in range(50)]
 
     def ddim_sampler_callback(pred_x0, xt, i):
