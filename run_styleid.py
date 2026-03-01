@@ -29,12 +29,15 @@ def save_img_from_sample(model, samples_ddim, fname):
     img.save(fname)
 
 def feat_merge(opt, cnt_feats, sty_feats, start_step=0):
-    feat_maps = [{'config': {
-                'gamma':opt.gamma,
-                'T':opt.T,
-                'timestep':_,
-                'gamma_per_layer': opt.gamma_per_layer_values,
-                }} for _ in range(50)]
+    feat_maps = []
+    for i in range(50):
+        gamma_i = opt.gamma_timestep_schedule[i] if opt.gamma_timestep_schedule is not None else opt.gamma
+        feat_maps.append({'config': {
+            'gamma': gamma_i,
+            'T': opt.T,
+            'timestep': i,
+            'gamma_per_layer': opt.gamma_per_layer_values,
+        }})
 
     for i in range(len(feat_maps)):
         if i < (50 - start_step):
@@ -107,6 +110,12 @@ def main():
     parser.add_argument('--gamma_per_layer', type=str, default=None,
                        help='Layer-wise gamma values as comma-separated list (6 values for layers 6-11). '
                             'Example: 0.5,0.5,0.5,0.9,0.9,0.9. If not specified, uses global --gamma for all layers.')
+    parser.add_argument('--use_timestep_gamma', action='store_true',
+                       help='Enable timestep-varying gamma (linear schedule from --gamma_start to --gamma_end)')
+    parser.add_argument('--gamma_start', type=float, default=None,
+                       help='Starting gamma value for the linear timestep schedule (applied at high-noise end, step 0)')
+    parser.add_argument('--gamma_end', type=float, default=None,
+                       help='Ending gamma value for the linear timestep schedule (applied at low-noise end, step 49)')
     parser.add_argument("--attn_layer", type=str, default='6,7,8,9,10,11', help='injection attention feature layers')
     parser.add_argument('--model_config', type=str, default='models/ldm/stable-diffusion-v1/v1-inference.yaml', help='model config')
     parser.add_argument('--precomputed', type=str, default='./precomputed_feats', help='save path for precomputed feature')
@@ -145,6 +154,41 @@ def main():
     else:
         opt.gamma_per_layer_values = None
         print(f"\nUsing global gamma = {opt.gamma:.2f} for all layers\n")
+
+    # Parse and validate timestep gamma schedule
+    if opt.use_timestep_gamma:
+        if opt.gamma_start is None or opt.gamma_end is None:
+            parser.error("--gamma_start and --gamma_end are required when --use_timestep_gamma is set")
+        if not (0.0 <= opt.gamma_start <= 1.0 and 0.0 <= opt.gamma_end <= 1.0):
+            parser.error("--gamma_start and --gamma_end must both be between 0.0 and 1.0")
+        opt.gamma_timestep_schedule = np.linspace(opt.gamma_start, opt.gamma_end, 50).tolist()
+        print("\n" + "=" * 45)
+        print("Timestep Gamma Schedule (linear):")
+        print(f"  Step  0 (high noise): {opt.gamma_start:.4f}")
+        print(f"  Step 49 (low noise):  {opt.gamma_end:.4f}")
+        print("=" * 45 + "\n")
+    else:
+        opt.gamma_timestep_schedule = None
+
+    # Warn clearly when both gamma flags are set, since per-layer silently overrides the schedule
+    if opt.gamma_per_layer_values is not None and opt.gamma_timestep_schedule is not None:
+        print("\n" + "!" * 55)
+        print("WARNING: Both --use_timestep_gamma and --gamma_per_layer are set.")
+        print("The per-layer values OVERRIDE the timestep schedule for all")
+        print("injected layers. The schedule has NO effect on those layers.")
+        print("\nEffective gamma per layer (constant across all timesteps):")
+        for layer, g in sorted(opt.gamma_per_layer_values.items()):
+            sched_start = opt.gamma_start
+            sched_end   = opt.gamma_end
+            print(f"  Layer {layer:2d}: {g:.4f}  (timestep schedule {sched_start:.4f}->{sched_end:.4f} ignored)")
+        print("!" * 55 + "\n")
+    elif opt.gamma_per_layer_values is not None:
+        print("Effective gamma: per-layer values for layers 6-11, global gamma={:.4f} elsewhere.\n".format(opt.gamma))
+    elif opt.gamma_timestep_schedule is not None:
+        print("Effective gamma: timestep schedule ({:.4f} -> {:.4f}) applied uniformly to all injected layers.\n".format(
+            opt.gamma_start, opt.gamma_end))
+    else:
+        print("Effective gamma: {:.4f} constant for all layers and timesteps.\n".format(opt.gamma))
 
     feat_path_root = opt.precomputed
 
