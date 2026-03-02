@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StyleID + ControlNet Integration</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&display=swap');
+
+  :root {
+    --bg: #0f1118;
+    --card: #181c28;
+    --border: #2a3045;
+    --text: #c8cdd8;
+    --heading: #e8ecf4;
+    --accent-blue: #5b9cf6;
+    --accent-purple: #a78bfa;
+    --accent-green: #6ee7b7;
+    --accent-orange: #fbbf24;
+    --accent-red: #f87171;
+    --accent-pink: #f472b6;
+    --style-color: #f472b6;
+    --content-color: #5b9cf6;
+    --cn-color: #6ee7b7;
+    --output-color: #fbbf24;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Source Serif 4', Georgia, serif;
+    line-height: 1.7;
+    padding: 40px 20px;
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--heading);
+    font-size: 1.8rem;
+    margin-bottom: 8px;
+    letter-spacing: -0.5px;
+  }
+
+  h1 span.blue { color: var(--accent-blue); }
+  h1 span.green { color: var(--cn-color); }
+
+  .subtitle {
+    color: #6b7280;
+    font-size: 0.95rem;
+    margin-bottom: 48px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  h2 {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--heading);
+    font-size: 1.15rem;
+    margin: 48px 0 20px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  h2 .num {
+    color: #6b7280;
+    font-weight: 400;
+  }
+
+  /* ═══════ FLOW DIAGRAM ═══════ */
+  .flow-section {
+    margin: 32px 0;
+  }
+
+  .flow-row {
+    display: flex;
+    align-items: stretch;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .flow-box {
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    background: var(--card);
+    flex: 1;
+    position: relative;
+    transition: border-color 0.2s;
+  }
+
+  .flow-box:hover { border-color: #4a5068; }
+
+  .flow-box.style-img { border-color: var(--style-color); }
+  .flow-box.content-img { border-color: var(--content-color); }
+  .flow-box.cn-box { border-color: var(--cn-color); border-style: dashed; }
+  .flow-box.output-box { border-color: var(--output-color); }
+
+  .flow-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 6px;
+  }
+
+  .flow-label.style { color: var(--style-color); }
+  .flow-label.content { color: var(--content-color); }
+  .flow-label.cn { color: var(--cn-color); }
+  .flow-label.output { color: var(--output-color); }
+  .flow-label.neutral { color: #6b7280; }
+
+  .flow-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.95rem;
+    color: var(--heading);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .flow-desc {
+    font-size: 0.85rem;
+    color: #8892a8;
+    line-height: 1.5;
+  }
+
+  .flow-code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent-purple);
+    background: rgba(167, 139, 250, 0.08);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  /* Arrow connectors */
+  .arrow-down {
+    text-align: center;
+    color: #4a5068;
+    font-size: 1.4rem;
+    margin: 4px 0;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .arrow-down.style-arrow { color: var(--style-color); }
+  .arrow-down.content-arrow { color: var(--content-color); }
+  .arrow-down.cn-arrow { color: var(--cn-color); }
+  .arrow-down.output-arrow { color: var(--output-color); }
+
+  .split-arrows {
+    display: flex;
+    gap: 16px;
+  }
+  .split-arrows > div { flex: 1; }
+
+  /* Big diagram */
+  .diagram-container {
+    background: var(--card);
+    border: 1.5px solid var(--border);
+    border-radius: 14px;
+    padding: 32px;
+    margin: 24px 0;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .diagram-container::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--content-color), var(--cn-color), var(--style-color), var(--output-color));
+  }
+
+  .unet-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .unet-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .unet-block {
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .unet-encoder {
+    background: rgba(91, 156, 246, 0.12);
+    border: 1px solid rgba(91, 156, 246, 0.3);
+    color: var(--accent-blue);
+  }
+
+  .unet-mid {
+    background: rgba(167, 139, 250, 0.12);
+    border: 1px solid rgba(167, 139, 250, 0.3);
+    color: var(--accent-purple);
+  }
+
+  .unet-decoder {
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+    color: var(--accent-red);
+  }
+
+  .cn-residual {
+    background: rgba(110, 231, 183, 0.12);
+    border: 1px dashed rgba(110, 231, 183, 0.4);
+    color: var(--cn-color);
+  }
+
+  .style-inject {
+    background: rgba(244, 114, 182, 0.12);
+    border: 1px solid rgba(244, 114, 182, 0.3);
+    color: var(--style-color);
+  }
+
+  .arrow-right {
+    color: #4a5068;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+  }
+
+  .plus {
+    color: var(--cn-color);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: #6b7280;
+  }
+
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  /* Highlight boxes */
+  .highlight {
+    background: rgba(110, 231, 183, 0.06);
+    border-left: 3px solid var(--cn-color);
+    padding: 16px 20px;
+    border-radius: 0 8px 8px 0;
+    margin: 20px 0;
+  }
+
+  .highlight p {
+    font-size: 0.9rem;
+    color: var(--text);
+  }
+
+  .highlight strong {
+    color: var(--cn-color);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+  }
+
+  /* File mapping */
+  .file-map {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 16px;
+    margin: 16px 0;
+  }
+
+  .file-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--accent-purple);
+  }
+
+  .file-role {
+    font-size: 0.85rem;
+    color: #6b7280;
+  }
+
+  /* Phase indicator */
+  .phase-tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+
+  .phase-unchanged {
+    background: rgba(107, 114, 128, 0.2);
+    color: #6b7280;
+  }
+
+  .phase-new {
+    background: rgba(110, 231, 183, 0.15);
+    color: var(--cn-color);
+  }
+
+  .phase-modified {
+    background: rgba(251, 191, 36, 0.15);
+    color: var(--output-color);
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 20px 0;
+  }
+
+  @media (max-width: 700px) {
+    .flow-row { flex-direction: column; }
+    .split-arrows { flex-direction: column; }
+    .summary-grid { grid-template-columns: 1fr; }
+    .legend { flex-direction: column; gap: 8px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1><span class="blue">StyleID</span> + <span class="green">ControlNet</span> Integration</h1>
+<p class="subtitle">How the two models work together — visual walkthrough</p>
+
+<!-- ═══════════════════════════════════════ -->
+<h2><span class="num">01</span> High-Level Pipeline</h2>
+
+<!-- Phase A: Inversion -->
+<div class="flow-section">
+  <div class="flow-row">
+    <div class="flow-box style-img">
+      <div class="flow-label style">Style Image</div>
+      <div class="flow-title">🎨 Style Image</div>
+      <div class="flow-desc">e.g., Van Gogh painting</div>
+    </div>
+    <div class="flow-box content-img">
+      <div class="flow-label content">Content Image</div>
+      <div class="flow-title">📷 Content Image</div>
+      <div class="flow-desc">e.g., photograph of a bridge</div>
+    </div>
+  </div>
+
+  <div class="split-arrows">
+    <div class="arrow-down style-arrow">↓ DDIM Inversion</div>
+    <div class="arrow-down content-arrow">↓ DDIM Inversion</div>
+  </div>
+
+  <div class="flow-row">
+    <div class="flow-box style-img">
+      <div class="flow-label style">Step 1 — Style Inversion</div>
+      <div class="flow-title">Extract Style K, V</div>
+      <div class="flow-desc">
+        Invert style image → noisy latent.<br>
+        Save <span class="flow-code">key</span> and <span class="flow-code">value</span> from self-attention layers 6–11 at each timestep.
+      </div>
+      <div class="flow-label neutral" style="margin-top:8px">⚙️ Unchanged from original StyleID</div>
+    </div>
+    <div class="flow-box content-img">
+      <div class="flow-label content">Step 2 — Content Inversion</div>
+      <div class="flow-title">Extract Content Q</div>
+      <div class="flow-desc">
+        Invert content image → noisy latent.<br>
+        Save <span class="flow-code">query</span> from self-attention layers 6–11 at each timestep.
+      </div>
+      <div class="flow-label neutral" style="margin-top:8px">⚙️ Unchanged from original StyleID</div>
+    </div>
+  </div>
+
+  <!-- ControlNet branch -->
+  <div class="arrow-down">↓</div>
+
+  <div class="flow-row">
+    <div class="flow-box cn-box" style="flex: 1;">
+      <div class="flow-label cn">Step 2.5 — ControlNet Condition Extraction <span class="phase-tag phase-new">NEW</span></div>
+      <div class="flow-title">Content Image → Depth Map → ControlNet Tensor</div>
+      <div class="flow-desc">
+        Load content image as RGB → run MiDaS depth estimator → 512×512 depth map.<br>
+        Convert to tensor <span class="flow-code">[1, 3, 512, 512]</span> for ControlNet input.<br>
+        <em>This happens once per content image, before the denoising loop.</em>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down">↓</div>
+
+  <!-- Merge -->
+  <div class="flow-row">
+    <div class="flow-box" style="border-color: var(--accent-purple);">
+      <div class="flow-label" style="color: var(--accent-purple);">Step 3 — Initial Latent Preparation</div>
+      <div class="flow-title">AdaIN: Blend Content + Style Latents</div>
+      <div class="flow-desc">
+        Apply AdaIN to content latent z<sub>c</sub> using style latent z<sub>s</sub> statistics.<br>
+        <span class="flow-code">z_cs = σ(z_s) * (z_c - μ(z_c)) / σ(z_c) + μ(z_s)</span>
+      </div>
+      <div class="flow-label neutral" style="margin-top:8px">⚙️ Unchanged from original StyleID</div>
+    </div>
+  </div>
+
+  <div class="arrow-down output-arrow">↓ Denoising Loop (50 timesteps)</div>
+
+  <!-- THE KEY DIAGRAM: Denoising Step -->
+  <div class="diagram-container">
+    <div class="flow-label output" style="margin-bottom: 16px; font-size: 0.8rem;">STEP 4 — DENOISING (REVERSE PASS) — EACH TIMESTEP</div>
+
+    <div class="unet-diagram">
+
+      <!-- Row 1: Inputs -->
+      <div class="unet-row" style="justify-content: center; gap: 24px; margin-bottom: 8px;">
+        <div class="unet-block unet-encoder" style="min-width: 140px;">
+          Noisy Latent z<sub>t</sub><br><span style="font-size:0.6rem; opacity:0.7">[1, 4, 64, 64]</span>
+        </div>
+        <div class="unet-block cn-residual" style="min-width: 160px;">
+          Depth Map (condition)<br><span style="font-size:0.6rem; opacity:0.7">[1, 3, 512, 512]</span>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:center; gap: 80px;">
+        <div class="arrow-down" style="margin:0">↓</div>
+        <div class="arrow-down cn-arrow" style="margin:0">↓</div>
+      </div>
+
+      <!-- Row 2: Parallel processing -->
+      <div class="unet-row" style="gap: 20px;">
+        <div style="flex:1;">
+          <div class="unet-block unet-encoder" style="width:100%; padding: 14px;">
+            <div style="font-size:0.8rem; margin-bottom:4px;">SD UNet Encoder</div>
+            <div style="font-size:0.65rem; opacity:0.7;">input_blocks[0..11]</div>
+            <div style="font-size:0.65rem; opacity:0.7;">Produces skip connections: hs[]</div>
+          </div>
+        </div>
+        <div style="flex:1;">
+          <div class="unet-block cn-residual" style="width:100%; padding: 14px;">
+            <div style="font-size:0.8rem; margin-bottom:4px;">ControlNet Encoder</div>
+            <div style="font-size:0.65rem; opacity:0.7;">Frozen copy of SD encoder</div>
+            <div style="font-size:0.65rem; opacity:0.7;">+ zero convolutions</div>
+            <div style="font-size:0.65rem; opacity:0.7; margin-top:4px;">Outputs: down_residuals[], mid_residual</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Row 3: Merge point -->
+      <div style="display:flex; align-items:center; justify-content:center; gap: 12px; margin: 8px 0;">
+        <div class="arrow-down" style="margin:0">↓ hs[i]</div>
+        <div class="plus">+</div>
+        <div class="arrow-down cn-arrow" style="margin:0">↓ residual[i]</div>
+        <div class="arrow-right">=</div>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:0.75rem; color:var(--heading);">hs[i] (structure-enhanced)</div>
+      </div>
+
+      <div class="highlight" style="margin: 12px 0;">
+        <p><strong>This is where ControlNet integrates:</strong> ControlNet residuals are <strong>added</strong> to the UNet's skip connections (hs) and middle block output. This biases the decoder to preserve spatial structure from the depth map.</p>
+      </div>
+
+      <!-- Row 4: Middle block -->
+      <div class="unet-row" style="justify-content:center;">
+        <div class="unet-block unet-mid" style="min-width: 300px;">
+          SD UNet Middle Block<br>
+          <span style="font-size:0.65rem; opacity:0.7;">h = middle_block(h) <strong style="color:var(--cn-color)">+ mid_residual</strong></span>
+        </div>
+      </div>
+
+      <div class="arrow-down">↓</div>
+
+      <!-- Row 5: Decoder with StyleID injection -->
+      <div class="unet-row" style="justify-content:center; gap: 16px;">
+        <div class="unet-block unet-decoder" style="min-width: 200px; padding: 14px;">
+          <div style="font-size:0.8rem; margin-bottom:4px;">SD UNet Decoder</div>
+          <div style="font-size:0.65rem; opacity:0.7;">output_blocks[0..11]</div>
+          <div style="font-size:0.65rem; opacity:0.7;">Uses structure-enhanced hs[]</div>
+        </div>
+        <div class="arrow-right">←</div>
+        <div class="unet-block style-inject" style="min-width: 200px; padding: 14px;">
+          <div style="font-size:0.8rem; margin-bottom:4px;">StyleID Injection</div>
+          <div style="font-size:0.65rem; opacity:0.7;">Layers 6–11 self-attention:</div>
+          <div style="font-size:0.65rem; opacity:0.7;">Q ← γ·Q<sub>content</sub> + (1-γ)·Q<sub>cs</sub></div>
+          <div style="font-size:0.65rem; opacity:0.7;">K, V ← K<sub>style</sub>, V<sub>style</sub></div>
+          <div style="font-size:0.65rem; opacity:0.7;">Temperature scaling: τ</div>
+        </div>
+      </div>
+
+      <div class="arrow-down output-arrow">↓</div>
+
+      <div class="unet-row" style="justify-content:center;">
+        <div class="unet-block" style="background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.3); color:var(--output-color); min-width: 300px;">
+          Predicted Noise ε<sub>θ</sub> → DDIM step → z<sub>t-1</sub>
+        </div>
+      </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--content-color)"></div>
+        Original SD UNet
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--cn-color)"></div>
+        ControlNet (NEW)
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--style-color)"></div>
+        StyleID attention injection
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--output-color)"></div>
+        Output
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--accent-purple)"></div>
+        Middle block
+      </div>
+    </div>
+  </div>
+
+  <!-- Final output -->
+  <div class="arrow-down output-arrow">↓ After 50 timesteps</div>
+
+  <div class="flow-row">
+    <div class="flow-box output-box">
+      <div class="flow-label output">Step 5 — Final Output</div>
+      <div class="flow-title">VAE Decode → Stylized Image</div>
+      <div class="flow-desc">
+        Decode denoised latent z<sub>0</sub> → pixel space.<br>
+        The image has: <strong style="color:var(--style-color)">style</strong> from attention injection +
+        <strong style="color:var(--cn-color)">structure</strong> from ControlNet depth guidance.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════ -->
+<h2><span class="num">02</span> What Changed vs Original StyleID</h2>
+
+<div class="summary-grid">
+  <div class="flow-box">
+    <div class="flow-label neutral">Unchanged ⚙️</div>
+    <div class="flow-desc" style="margin-top:8px">
+      • DDIM inversion (both content & style)<br>
+      • Feature extraction (Q, K, V from attention)<br>
+      • AdaIN latent blending<br>
+      • StyleID attention injection (Q/K/V swap)<br>
+      • Evaluation pipeline<br>
+      • All original CLI arguments<br>
+      • Output format and naming
+    </div>
+  </div>
+  <div class="flow-box cn-box">
+    <div class="flow-label cn">Added by ControlNet 🆕</div>
+    <div class="flow-desc" style="margin-top:8px">
+      • Depth map extraction from content image<br>
+      • ControlNet encoder forward pass per timestep<br>
+      • Residuals added to UNet skip connections<br>
+      • Residual added to UNet middle block<br>
+      • New CLI args: <span class="flow-code">--controlnet</span> <span class="flow-code">--cn_scale</span><br>
+      • 3 new files (no original files modified)
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════ -->
+<h2><span class="num">03</span> Where Each File Fits</h2>
+
+<div class="file-map">
+  <div class="file-name">run_styleid.py <span class="phase-tag phase-modified">modified</span></div>
+  <div class="file-role">Entry point. Adds --controlnet args, loads ControlNet, extracts depth, patches DDIM before denoising loop.</div>
+
+  <div class="file-name">controlnet_utils.py <span class="phase-tag phase-new">new</span></div>
+  <div class="file-role">Loads ControlNet model from HuggingFace. Extracts depth maps via MiDaS. Runs ControlNet forward → residuals.</div>
+
+  <div class="file-name">controlnet_patch.py <span class="phase-tag phase-new">new</span></div>
+  <div class="file-role">Monkey-patches UNet.forward() to accept <span class="flow-code">controlnet_residuals</span> and add them to skip connections. Also patches DiffusionWrapper and apply_model to pass them through.</div>
+
+  <div class="file-name">controlnet_ddim_patch.py <span class="phase-tag phase-new">new</span></div>
+  <div class="file-role">Patches DDIM sampler's p_sample_ddim(). At each timestep: runs ControlNet → gets residuals → passes them to UNet along with StyleID's injected_features.</div>
+
+  <div class="file-name">ldm/ <span class="phase-tag phase-unchanged">unchanged</span></div>
+  <div class="file-role">All original LDM code (UNet, DDIM, attention, etc.) is untouched. Monkey-patches avoid editing these files.</div>
+</div>
+
+<!-- ═══════════════════════════════════════ -->
+<h2><span class="num">04</span> Key Insight: Two Orthogonal Controls</h2>
+
+<div class="diagram-container" style="padding: 24px;">
+  <div style="display: flex; gap: 24px; align-items: stretch;">
+    <div style="flex:1; padding: 16px; border-radius: 8px; background: rgba(244,114,182,0.08); border: 1px solid rgba(244,114,182,0.2);">
+      <div style="font-family:'JetBrains Mono',monospace; font-size:0.8rem; color:var(--style-color); font-weight:600; margin-bottom:8px;">StyleID Controls</div>
+      <div style="font-size:0.85rem; color: var(--text);">
+        <strong>What:</strong> Texture, color, artistic style<br>
+        <strong>How:</strong> Swap K,V in self-attention with style image features<br>
+        <strong>Where:</strong> Decoder layers 6–11 (self-attention)<br>
+        <strong>Knobs:</strong> γ (query preservation), τ (temperature)
+      </div>
+    </div>
+    <div style="flex:1; padding: 16px; border-radius: 8px; background: rgba(110,231,183,0.08); border: 1px dashed rgba(110,231,183,0.2);">
+      <div style="font-family:'JetBrains Mono',monospace; font-size:0.8rem; color:var(--cn-color); font-weight:600; margin-bottom:8px;">ControlNet Controls</div>
+      <div style="font-size:0.85rem; color: var(--text);">
+        <strong>What:</strong> Spatial structure, depth, edges<br>
+        <strong>How:</strong> Add residuals to skip connections (encoder→decoder)<br>
+        <strong>Where:</strong> All skip connections + middle block<br>
+        <strong>Knobs:</strong> cn_scale (conditioning strength)
+      </div>
+    </div>
+  </div>
+  <div style="text-align:center; margin-top:16px; font-family:'JetBrains Mono',monospace; font-size:0.8rem; color:#6b7280;">
+    These two mechanisms operate on <strong style="color:var(--heading)">different parts</strong> of the UNet and <strong style="color:var(--heading)">don't interfere</strong> with each other.
+    <br>StyleID injects into decoder attention → ControlNet injects into skip connections.
+  </div>
+</div>
+
+</div>
+</body>
+</html>

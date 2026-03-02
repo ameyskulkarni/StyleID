@@ -1,0 +1,356 @@
+# StyleID Visual Workflow & Architecture
+
+## Complete Pipeline Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          STYLEID PIPELINE                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+PHASE 1: PREPARATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Content Image (512×512)              Style Image (512×512)
+        ↓                                      ↓
+   [VAE Encoder]                          [VAE Encoder]
+        ↓                                      ↓
+    z₀ᶜ (4×64×64)                          z₀ˢ (4×64×64)
+
+
+PHASE 2: DDIM INVERSION (Collect Features)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Content Path:                        Style Path:
+  ┌──────────┐                         ┌──────────┐
+  │   z₀ᶜ    │                         │   z₀ˢ    │
+  └────┬─────┘                         └────┬─────┘
+       │                                     │
+   [DDIM Inversion]                     [DDIM Inversion]
+   + Save Q at each step                + Save K,V at each step
+       │                                     │
+       ↓                                     ↓
+  z₁ᶜ → z₂ᶜ → ... → zₜᶜ                  z₁ˢ → z₂ˢ → ... → zₜˢ
+   │     │          │                    │     │          │
+  [Q₁ᶜ] [Q₂ᶜ]     [Qₜᶜ]                [K₁ˢ,V₁ˢ] [K₂ˢ,V₂ˢ] [Kₜˢ,Vₜˢ]
+       │                                     │
+       ↓                                     ↓
+     z_Tᶜ                                  z_Tˢ
+  (final noise)                         (final noise)
+
+
+PHASE 3: INITIAL LATENT ADAIN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+              z_Tᶜ                     z_Tˢ
+               │                        │
+               └───────────┬───────────┘
+                           ↓
+                   ┌──────────────┐
+                   │ Initial AdaIN│
+                   │              │
+                   │ Transfer μ,σ │
+                   │ from zˢ to zᶜ│
+                   └──────┬───────┘
+                          ↓
+                       z_T^cs
+                   (stylized noise)
+
+
+PHASE 4: REVERSE DIFFUSION WITH STYLE INJECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For each timestep t = T, T-1, ..., 1, 0:
+
+        zₜᶜˢ
+         ↓
+    ┌──────────┐
+    │  U-Net   │
+    │  Forward │
+    └────┬─────┘
+         │
+    ┌────┴─────────────────────────────────────────┐
+    │                                               │
+    │  DECODER LAYERS (7, 8, 9, 10, 11)           │
+    │                                               │
+    │  ┌────────────────────────────────────────┐  │
+    │  │  Self-Attention Layer                  │  │
+    │  │                                         │  │
+    │  │  Normal:    Q, K, V  ← same image     │  │
+    │  │                                         │  │
+    │  │  StyleID:                              │  │
+    │  │    ┌─────────────────────────────┐    │  │
+    │  │    │ Query Preservation:         │    │  │
+    │  │    │ Q̃ = γ×Qᶜ + (1-γ)×Q^cs      │    │  │
+    │  │    └─────────────────────────────┘    │  │
+    │  │    ┌─────────────────────────────┐    │  │
+    │  │    │ Style Injection:            │    │  │
+    │  │    │ Use K=Kˢ, V=Vˢ (from style)│    │  │
+    │  │    └─────────────────────────────┘    │  │
+    │  │    ┌─────────────────────────────┐    │  │
+    │  │    │ Temperature Scaling:        │    │  │
+    │  │    │ Attention = softmax(τ·QK^T) │    │  │
+    │  │    └─────────────────────────────┘    │  │
+    │  │                                         │  │
+    │  │  Output = Attention(Q̃, Kˢ, Vˢ)       │  │
+    │  └────────────────────────────────────────┘  │
+    └───────────────────────┬───────────────────────┘
+                            ↓
+                      noise prediction εₜ
+                            ↓
+                      zₜ₋₁^cs = f(zₜ^cs, εₜ)
+
+Repeat until t=0
+
+         ↓
+       z₀^cs
+         ↓
+   [VAE Decoder]
+         ↓
+  Stylized Image (512×512)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+DETAILED VIEW: SELF-ATTENTION MANIPULATION
+═══════════════════════════════════════════════════════════════════════════════
+
+Standard Self-Attention:
+┌──────────────────────────────────┐
+│  Input: zₜ                       │
+│    ↓                              │
+│  Q = Wq × zₜ                     │
+│  K = Wk × zₜ                     │
+│  V = Wv × zₜ                     │
+│    ↓                              │
+│  Attn = softmax(QK^T/√d) × V    │
+│    ↓                              │
+│  Output                           │
+└──────────────────────────────────┘
+
+StyleID Modified Self-Attention:
+┌──────────────────────────────────┐
+│  Input: zₜ^cs (stylized)         │
+│    ↓                              │
+│  Q^cs = Wq × zₜ^cs               │
+│  ┌────────────────────┐          │
+│  │ Query Preservation │          │
+│  │ Q̃ = γ×Qᶜ + (1-γ)×Q^cs        │
+│  └────────────────────┘          │
+│    ↓                              │
+│  ┌────────────────────┐          │
+│  │ Style Injection    │          │
+│  │ K = Kˢ (from style)│          │
+│  │ V = Vˢ (from style)│          │
+│  └────────────────────┘          │
+│    ↓                              │
+│  ┌────────────────────┐          │
+│  │ Temp. Scaling      │          │
+│  │ Attn = softmax(    │          │
+│  │   τ × Q̃K^T/√d     │          │
+│  │ ) × V              │          │
+│  └────────────────────┘          │
+│    ↓                              │
+│  Output (styled features)        │
+└──────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PARAMETER EFFECTS VISUALIZATION
+═══════════════════════════════════════════════════════════════════════════════
+
+γ (Query Preservation) - Style-Content Trade-off:
+
+0.0 ◄──────────────────γ──────────────────► 1.0
+│                                             │
+Pure Style                            Pure Content
+Lost Content                           No Style
+
+        0.3           0.5           0.75
+         ↓             ↓              ↓
+    Strong Style   Balanced      Default
+    Creative      50-50 mix     Good balance
+
+
+τ (Temperature) - Attention Sharpness:
+
+1.0 ◄──────────────────τ──────────────────► 2.0
+│                                             │
+Blurry                                  Very Sharp
+Smoothed                              Over-sharpened
+
+                      1.5
+                       ↓
+                    Default
+                  Well-defined
+                     Sharp
+
+
+Injection Layers - Style Granularity:
+
+Layers:  0  1  2  3  4  5  6  7  8  9  10  11
+         │─────────│─────────│──────────────│
+         Global     Shapes     Textures
+         Layout              & Details
+                              ↑
+                         Default: [7,8,9,10,11]
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+FEATURE FLOW DIAGRAM
+═══════════════════════════════════════════════════════════════════════════════
+
+During DDIM Inversion:
+┌───────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  Content Image              Style Image                        │
+│       ↓                          ↓                             │
+│   Forward → t₁ → t₂ → ... → tₙ → noise                       │
+│   through                                                       │
+│   U-Net    ↓    ↓         ↓                                   │
+│         Save  Save     Save                                    │
+│         Q₁ᶜ   Q₂ᶜ      Qₙᶜ                                    │
+│                                                                 │
+│                            ↓    ↓         ↓                    │
+│                         Save  Save     Save                    │
+│                         K₁ˢ   K₂ˢ      Kₙˢ                    │
+│                         V₁ˢ   V₂ˢ      Vₙˢ                    │
+│                                                                 │
+│  Feature Storage:                                              │
+│  attn_features = {                                             │
+│      'layer_7': {'query_content': [Q₁ᶜ, Q₂ᶜ, ...]},          │
+│      'layer_8': {'key_style': [K₁ˢ, K₂ˢ, ...],               │
+│                  'value_style': [V₁ˢ, V₂ˢ, ...]},            │
+│      ...                                                        │
+│  }                                                             │
+└───────────────────────────────────────────────────────────────┘
+
+During Reverse Diffusion:
+┌───────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  At timestep t:                                                │
+│                                                                 │
+│  1. Retrieve saved features:                                   │
+│     Qᶜ[t], Kˢ[t], Vˢ[t]                                       │
+│                                                                 │
+│  2. Compute current features:                                  │
+│     Q^cs[t] = Wq × zₜ^cs                                      │
+│                                                                 │
+│  3. Apply query preservation:                                  │
+│     Q̃[t] = γ × Qᶜ[t] + (1-γ) × Q^cs[t]                       │
+│                                                                 │
+│  4. Compute attention with injected features:                  │
+│     output = Attention_τ(Q̃[t], Kˢ[t], Vˢ[t])                 │
+│                                                                 │
+│  5. Continue forward pass with modified output                 │
+│                                                                 │
+└───────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+CODE EXECUTION TRACE
+═══════════════════════════════════════════════════════════════════════════════
+
+main()
+│
+├─ Load Models
+│  ├─ load_stable_diffusion()
+│  │  ├─ Load UNet
+│  │  ├─ Load VAE
+│  │  ├─ Load Text Encoder
+│  │  └─ Load Scheduler
+│  └─ Return components
+│
+├─ Load & Encode Images
+│  ├─ Load content image
+│  ├─ Load style image
+│  ├─ encode_latent(content) → z₀ᶜ
+│  └─ encode_latent(style) → z₀ˢ
+│
+├─ Create Style Transfer Module
+│  └─ style_transfer_module.__init__()
+│     ├─ Initialize parameters (γ, τ, layers)
+│     ├─ Get UNet layers
+│     └─ Prepare feature storage dicts
+│
+├─ DDIM Inversion - Content
+│  ├─ style_module.set_mode('get_query')
+│  ├─ register_attn_hooks('get')
+│  └─ invert_process(z₀ᶜ)
+│     └─ For t=0 to T:
+│        ├─ Forward through U-Net
+│        ├─ Hook captures Q at each layer
+│        └─ Store in attn_features['query_content']
+│     → Returns z_Tᶜ
+│
+├─ DDIM Inversion - Style
+│  ├─ style_module.set_mode('get_kv')
+│  ├─ register_attn_hooks('get')
+│  └─ invert_process(z₀ˢ)
+│     └─ For t=0 to T:
+│        ├─ Forward through U-Net
+│        ├─ Hook captures K,V at each layer
+│        └─ Store in attn_features['key_style', 'value_style']
+│     → Returns z_Tˢ
+│
+├─ Initial Latent AdaIN (if enabled)
+│  └─ initial_latent_adain(z_Tᶜ, z_Tˢ)
+│     ├─ Compute μ(z_Tᶜ), σ(z_Tᶜ)
+│     ├─ Compute μ(z_Tˢ), σ(z_Tˢ)
+│     └─ Return: σ(z_Tˢ) × (z_Tᶜ - μ(z_Tᶜ))/σ(z_Tᶜ) + μ(z_Tˢ)
+│     → Returns z_T^cs
+│
+├─ Style Transfer (Reverse Diffusion)
+│  ├─ style_module.set_mode('inject')
+│  ├─ register_attn_hooks('modify')
+│  └─ denoise_process(z_T^cs)
+│     └─ For t=T to 0:
+│        ├─ Forward through U-Net
+│        ├─ At each attention layer:
+│        │  ├─ Hook intercepts
+│        │  ├─ modify_attn_features() called
+│        │  │  ├─ Get saved Qᶜ[t], Kˢ[t], Vˢ[t]
+│        │  │  ├─ Compute Q̃ = γ×Qᶜ + (1-γ)×Q^cs
+│        │  │  └─ Return modified attention output
+│        │  └─ Continue with modified features
+│        └─ Scheduler step: zₜ → zₜ₋₁
+│     → Returns z₀^cs
+│
+├─ Decode Result
+│  └─ decode_latent(z₀^cs) → stylized_image
+│
+└─ Save Output
+   └─ stylized_image.save()
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+KEY EQUATIONS SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Query Preservation:
+   Q̃ₜ^cs = γ × Qₜᶜ + (1-γ) × Qₜ^cs
+
+2. Style Injection:
+   φₜ^cs = Attention(Q̃ₜ^cs, Kₜˢ, Vₜˢ)
+
+3. Temperature Scaling:
+   Attentionτ(Q̃, K, V) = softmax(τ × Q̃K^T / √d) × V
+
+4. Initial Latent AdaIN:
+   z_T^cs = σ(z_Tˢ) × (z_Tᶜ - μ(z_Tᶜ)) / σ(z_Tᶜ) + μ(z_Tˢ)
+
+Where:
+  γ ∈ [0,1]     - Query preservation ratio
+  τ > 1         - Temperature scaling factor
+  μ(·)          - Channel-wise mean
+  σ(·)          - Channel-wise standard deviation
+  ^c, ^s, ^cs   - Content, style, and stylized features
+
+
+═══════════════════════════════════════════════════════════════════════════════
+END OF WORKFLOW DIAGRAM
+═══════════════════════════════════════════════════════════════════════════════
+```
