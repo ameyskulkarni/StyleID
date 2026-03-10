@@ -11,28 +11,58 @@ from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, mak
 
 
 def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tensor,
-                                conditioning_scale=1.0, text_embeddings=None):
+                                conditioning_scale=1.0, text_embeddings=None,
+                                start_scale_per_layer=None, end_scale_per_layer=None):
     """
     Patch a DDIMSampler instance so that its sample() method uses ControlNet
     during the reverse (denoising) pass.
-    
+
     Args:
         sampler: DDIMSampler instance
         controlnet_wrapper: ControlNetWrapper instance
         controlnet_cond_tensor: [1, 3, 512, 512] condition tensor (e.g., depth map)
-        conditioning_scale: float, strength of ControlNet
+        conditioning_scale: uniform ControlNet scale, used when start_scale_per_layer is None
         text_embeddings: text embeddings for ControlNet (uses uncond if None)
+        start_scale_per_layer: optional list of per-layer scales at the first denoising timestep.
+            Length must equal the total number of ControlNet residuals (12 down + 1 mid = 13 for SD 1.5).
+            When provided, conditioning_scale is ignored.
+        end_scale_per_layer: optional list of per-layer scales at the last denoising timestep.
+            Must be the same length as start_scale_per_layer.  When omitted but start is given,
+            start_scale_per_layer is used as a fixed per-layer scale for every timestep.
     """
     import types
-    
+
     # Store references on the sampler for access in patched methods
     sampler._cn_wrapper = controlnet_wrapper
     sampler._cn_cond = controlnet_cond_tensor
     sampler._cn_scale = conditioning_scale
     sampler._cn_text_emb = text_embeddings
+    sampler._cn_start_scale = start_scale_per_layer
+    sampler._cn_end_scale = end_scale_per_layer
     
+    def _compute_layer_scales(sampler_self, index):
+        """
+        Compute effective per-layer ControlNet scales for the current DDIM step.
+
+        DDIM index counts down from S-1 (first step) to 0 (last step).
+        We map this to a step counter t in [0, T-1] where t=0 is the first
+        denoising step and t=T-1 is the last, then linearly interpolate:
+
+            effective_scale[i] = start[i] + (end[i] - start[i]) * (t / (T - 1))
+        """
+        start = sampler_self._cn_start_scale
+        if start is None:
+            return None  # fall back to uniform _cn_scale
+        end = sampler_self._cn_end_scale
+        if end is None:
+            return list(start)  # fixed per-layer, no timestep interpolation
+        T = len(sampler_self.ddim_timesteps)
+        t = T - 1 - index  # first step → t=0, last step → t=T-1
+        alpha = t / (T - 1) if T > 1 else 0.0
+        return [s + (e - s) * alpha for s, e in zip(start, end)]
+
     original_p_sample = sampler.p_sample_ddim
-    
+
     @torch.no_grad()
     def p_sample_ddim_with_cn(self, x, c, t, index, negative_conditioning=None,
                               repeat_noise=False, use_original_steps=False, 
@@ -71,12 +101,14 @@ def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tenso
             if cn_text.shape[0] != x.shape[0]:
                 cn_text = cn_text.repeat(x.shape[0], 1, 1)
             
+            layer_scales = _compute_layer_scales(self, index)
             down_samples, mid_sample = self._cn_wrapper.get_residuals(
                 sample=x.to(self._cn_wrapper.dtype),
                 timestep=t[0] if t.dim() > 0 else t,  # scalar timestep
                 encoder_hidden_states=cn_text.to(self._cn_wrapper.dtype),
                 controlnet_cond=cn_cond,
                 conditioning_scale=self._cn_scale,
+                layer_scales=layer_scales,
             )
             # Cast back to model dtype
             down_samples = [d.to(x.dtype) for d in down_samples]

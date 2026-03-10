@@ -163,17 +163,20 @@ class ControlNetWrapper:
         return img.to(device=device, dtype=dtype)
     
     def get_residuals(self, sample, timestep, encoder_hidden_states, controlnet_cond,
-                      conditioning_scale=1.0):
+                      conditioning_scale=1.0, layer_scales=None):
         """
         Run ControlNet forward pass to get residuals.
-        
+
         Args:
             sample: noisy latent [B, 4, 64, 64]
             timestep: current timestep (scalar or tensor)
             encoder_hidden_states: text conditioning [B, 77, 768]
             controlnet_cond: condition image tensor [B, 3, 512, 512]
-            conditioning_scale: strength of ControlNet influence
-            
+            conditioning_scale: uniform strength of ControlNet influence (used when layer_scales is None)
+            layer_scales: optional list of per-layer floats. When provided, conditioning_scale is
+                          ignored and each residual is multiplied by its corresponding entry.
+                          Indices 0..N-2 correspond to down_block_res_samples, index N-1 to mid_block.
+
         Returns:
             down_block_res_samples: list of tensors for skip connections
             mid_block_res_sample: tensor for middle block
@@ -184,13 +187,22 @@ class ControlNetWrapper:
                 timestep=timestep,
                 encoder_hidden_states=encoder_hidden_states,
                 controlnet_cond=controlnet_cond,
-                conditioning_scale=conditioning_scale,
+                conditioning_scale=1.0 if layer_scales is not None else conditioning_scale,
                 return_dict=True,
             )
-        
-        down_block_res_samples = result.down_block_res_samples
+
+        down_block_res_samples = list(result.down_block_res_samples)
         mid_block_res_sample = result.mid_block_res_sample
-        
+
+        if layer_scales is not None:
+            n_down = len(down_block_res_samples)
+            for i in range(n_down):
+                if i < len(layer_scales):
+                    down_block_res_samples[i] = down_block_res_samples[i] * layer_scales[i]
+            mid_idx = n_down
+            if mid_idx < len(layer_scales):
+                mid_block_res_sample = mid_block_res_sample * layer_scales[mid_idx]
+
         return down_block_res_samples, mid_block_res_sample
     
     def to_cpu(self):

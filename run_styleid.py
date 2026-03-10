@@ -171,9 +171,31 @@ def main():
                         help='ControlNet version (1.0 or 1.1)')
     parser.add_argument('--save_condition', action='store_true',
                         help='Save extracted condition maps (e.g., depth maps) to output dir')
+    parser.add_argument('--cn_start_scale_per_layer', type=str, default=None,
+                        help='Comma-separated per-layer ControlNet scales at the first denoising '
+                             'timestep (13 values for SD 1.5: 12 down-block + 1 mid-block). '
+                             'When set, overrides --cn_scale.')
+    parser.add_argument('--cn_end_scale_per_layer', type=str, default=None,
+                        help='Comma-separated per-layer ControlNet scales at the last denoising '
+                             'timestep. Must be the same length as --cn_start_scale_per_layer. '
+                             'When omitted, start scales are used uniformly across all timesteps.')
     # ===== END CONTROLNET =====
 
     opt = parser.parse_args()
+
+    # ===== CONTROLNET: parse per-layer scale lists =====
+    opt.cn_start_scale_list = None
+    opt.cn_end_scale_list = None
+    if opt.cn_start_scale_per_layer is not None:
+        opt.cn_start_scale_list = [float(x.strip()) for x in opt.cn_start_scale_per_layer.split(',')]
+    if opt.cn_end_scale_per_layer is not None:
+        opt.cn_end_scale_list = [float(x.strip()) for x in opt.cn_end_scale_per_layer.split(',')]
+        if opt.cn_start_scale_list is not None and len(opt.cn_end_scale_list) != len(opt.cn_start_scale_list):
+            raise ValueError(
+                f"--cn_start_scale_per_layer and --cn_end_scale_per_layer must have the same length "
+                f"(got {len(opt.cn_start_scale_list)} vs {len(opt.cn_end_scale_list)})"
+            )
+    # ===== END CONTROLNET =====
 
     # Parse and validate gamma_per_layer
     if opt.gamma_per_layer is not None:
@@ -336,6 +358,19 @@ def main():
         sty_feat_name = os.path.join(feat_path_root, os.path.basename(sty_name).split('.')[0] + '_sty.pkl')
         sty_z_enc = None
 
+        # Free previous iteration's GPU tensors before processing the next style image.
+        # Without this, sty_feat, cnt_feat, and the merged feat_maps from the previous
+        # outer loop iteration all stay alive simultaneously with the new feat_maps from
+        # the upcoming style inversion, causing OOM on the deepcopy at line ~350.
+        feat_maps = [{'config': {
+            'gamma': opt.gamma,
+            'T': opt.T,
+            'gamma_per_layer': opt.gamma_per_layer_values,
+        }} for _ in range(50)]
+        sty_feat = None
+        cnt_feat = None
+        torch.cuda.empty_cache()
+
         if len(feat_path_root) > 0 and os.path.isfile(sty_feat_name):
             print("Precomputed style feature loading: ", sty_feat_name)
             with open(sty_feat_name, 'rb') as h:
@@ -391,6 +426,8 @@ def main():
                     sampler, cn_wrapper, cn_cond_tensor,
                     conditioning_scale=opt.cn_scale,
                     text_embeddings=uc,
+                    start_scale_per_layer=opt.cn_start_scale_list,
+                    end_scale_per_layer=opt.cn_end_scale_list,
                 )
             # ===== END CONTROLNET =====
 
@@ -442,6 +479,7 @@ def main():
             if cn_wrapper is not None:
                 unpatch_ddim(sampler)
             # ===== END CONTROLNET =====
+            torch.cuda.empty_cache()
 
     print(f"Total end: {time.time() - begin}")
 
