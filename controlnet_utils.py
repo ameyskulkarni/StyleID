@@ -8,9 +8,12 @@ This module provides:
 
 Place this file in the root of the StyleID repo (next to run_styleid.py).
 
-Supported condition types (phase 1: depth only, extensible):
-  - depth: MiDaS depth estimation
-  - [future] canny, normal, seg, hed, etc.
+Supported condition types (v1.0 ControlNet / SD 1.4):
+  - depth: MiDaS depth estimation (transformers pipeline)
+  - canny: Canny edge detection (OpenCV)
+  - normal: MiDaS surface normals (controlnet_aux MidasDetector)
+  - hed: HED soft edges (controlnet_aux HEDdetector)
+  - seg: ADE20K colored segmentation (controlnet_aux UniformerDetector)
 """
 
 import torch
@@ -91,18 +94,45 @@ def _extract_canny(image_np, low_threshold=100, high_threshold=200):
 
 
 def _extract_normal(image_np, device="cuda"):
-    """Extract normal map. Placeholder for future use."""
-    raise NotImplementedError("Normal map extraction not yet implemented. Coming in a future phase.")
+    """Extract surface normal map using MiDaS (matched to sd-controlnet-normal v1.0 training format)."""
+    from controlnet_aux import MidasDetector
+
+    detector = MidasDetector.from_pretrained("lllyasviel/Annotators")
+    pil_img = Image.fromarray(image_np).resize((512, 512))
+    _, normal = detector(pil_img, depth_and_normal=True)
+    del detector
+    torch.cuda.empty_cache()
+    if not isinstance(normal, Image.Image):
+        normal = Image.fromarray(normal)
+    return normal.resize((512, 512))
 
 
 def _extract_hed(image_np, device="cuda"):
-    """Extract HED soft edges. Placeholder for future use."""
-    raise NotImplementedError("HED extraction not yet implemented. Coming in a future phase.")
+    """Extract HED soft edges (matched to sd-controlnet-hed v1.0 training format)."""
+    from controlnet_aux import HEDdetector
+
+    detector = HEDdetector.from_pretrained("lllyasviel/Annotators")
+    pil_img = Image.fromarray(image_np).resize((512, 512))
+    result = detector(pil_img)
+    del detector
+    torch.cuda.empty_cache()
+    if not isinstance(result, Image.Image):
+        result = Image.fromarray(result)
+    return result.resize((512, 512))
 
 
 def _extract_seg(image_np, device="cuda"):
-    """Extract segmentation map. Placeholder for future use."""
-    raise NotImplementedError("Segmentation extraction not yet implemented. Coming in a future phase.")
+    """Extract ADE20K colored segmentation map (matched to sd-controlnet-seg v1.0 training format)."""
+    from controlnet_aux import UniformerDetector
+
+    detector = UniformerDetector.from_pretrained("lllyasviel/Annotators")
+    pil_img = Image.fromarray(image_np).resize((512, 512))
+    result = detector(pil_img)
+    del detector
+    torch.cuda.empty_cache()
+    if not isinstance(result, Image.Image):
+        result = Image.fromarray(result)
+    return result.resize((512, 512))
 
 
 # ─────────────────────────────────────────────────
