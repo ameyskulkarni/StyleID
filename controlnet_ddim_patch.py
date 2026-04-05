@@ -12,7 +12,8 @@ from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, mak
 
 def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tensor,
                                 conditioning_scale=1.0, text_embeddings=None,
-                                start_scale_per_layer=None, end_scale_per_layer=None):
+                                start_scale_per_layer=None, end_scale_per_layer=None,
+                                schedule_type="linear"):
     """
     Patch a DDIMSampler instance so that its sample() method uses ControlNet
     during the reverse (denoising) pass.
@@ -29,6 +30,7 @@ def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tenso
         end_scale_per_layer: optional list of per-layer scales at the last denoising timestep.
             Must be the same length as start_scale_per_layer.  When omitted but start is given,
             start_scale_per_layer is used as a fixed per-layer scale for every timestep.
+        schedule_type: interpolation curve type ('linear', 'quadratic', 'sqrt', 'cosine', 'exponential')
     """
     import types
 
@@ -39,6 +41,7 @@ def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tenso
     sampler._cn_text_emb = text_embeddings
     sampler._cn_start_scale = start_scale_per_layer
     sampler._cn_end_scale = end_scale_per_layer
+    sampler._cn_schedule_type = schedule_type
     
     def _compute_layer_scales(sampler_self, index):
         """
@@ -46,10 +49,14 @@ def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tenso
 
         DDIM index counts down from S-1 (first step) to 0 (last step).
         We map this to a step counter t in [0, T-1] where t=0 is the first
-        denoising step and t=T-1 is the last, then linearly interpolate:
+        denoising step and t=T-1 is the last, then interpolate using the
+        configured schedule type:
 
-            effective_scale[i] = start[i] + (end[i] - start[i]) * (t / (T - 1))
+            alpha = schedule(t / (T - 1))
+            effective_scale[i] = start[i] + (end[i] - start[i]) * alpha
         """
+        from schedule_utils import warp_alpha
+
         start = sampler_self._cn_start_scale
         if start is None:
             return None  # fall back to uniform _cn_scale
@@ -59,7 +66,8 @@ def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tenso
         T = len(sampler_self.ddim_timesteps)
         t = T - 1 - index  # first step → t=0, last step → t=T-1
         alpha = t / (T - 1) if T > 1 else 0.0
-        return [s + (e - s) * alpha for s, e in zip(start, end)]
+        warped = warp_alpha(alpha, sampler_self._cn_schedule_type)
+        return [s + (e - s) * warped for s, e in zip(start, end)]
 
     original_p_sample = sampler.p_sample_ddim
 
@@ -194,6 +202,14 @@ def patch_ddim_for_controlnet(sampler, controlnet_wrapper, controlnet_cond_tenso
     
     sampler.p_sample_ddim = types.MethodType(p_sample_ddim_with_cn, sampler)
     print(f"[ControlNet] DDIM sampler patched (scale={conditioning_scale}).")
+    if start_scale_per_layer is not None and end_scale_per_layer is not None:
+        from schedule_utils import make_schedule
+        T = len(sampler.ddim_timesteps)
+        print(f"[ControlNet] Per-layer scale schedule ({schedule_type}), layer 0 example:")
+        example_schedule = make_schedule(start_scale_per_layer[0], end_scale_per_layer[0], T, schedule_type)
+        for step in range(0, T, 5):
+            print(f"  Step {step:2d}: {example_schedule[step]:.4f}")
+        print(f"  Step {T-1:2d}: {example_schedule[-1]:.4f}")
 
 
 def unpatch_ddim(sampler):

@@ -110,10 +110,14 @@ def adain(cnt_feat, sty_feat):
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location="cpu")
-    if "global_step" in pl_sd:
-        print(f"Global Step: {pl_sd['global_step']}")
-    sd = pl_sd["state_dict"]
+    if ckpt.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        sd = load_file(ckpt, device="cpu")
+    else:
+        pl_sd = torch.load(ckpt, map_location="cpu")
+        if "global_step" in pl_sd:
+            print(f"Global Step: {pl_sd['global_step']}")
+        sd = pl_sd["state_dict"]
     model = instantiate_from_config(config.model)
     m, u = model.load_state_dict(sd, strict=False)
     if len(m) > 0 and verbose:
@@ -145,11 +149,14 @@ def main():
                        help='Layer-wise gamma values as comma-separated list (6 values for layers 6-11). '
                             'Example: 0.5,0.5,0.5,0.9,0.9,0.9. If not specified, uses global --gamma for all layers.')
     parser.add_argument('--use_timestep_gamma', action='store_true',
-                       help='Enable timestep-varying gamma (linear schedule from --gamma_start to --gamma_end)')
+                       help='Enable timestep-varying gamma (schedule from --gamma_start to --gamma_end)')
     parser.add_argument('--gamma_start', type=float, default=None,
-                       help='Starting gamma value for the linear timestep schedule (applied at high-noise end, step 0)')
+                       help='Starting gamma value for the timestep schedule (applied at high-noise end, step 0)')
     parser.add_argument('--gamma_end', type=float, default=None,
-                       help='Ending gamma value for the linear timestep schedule (applied at low-noise end, step 49)')
+                       help='Ending gamma value for the timestep schedule (applied at low-noise end, step 49)')
+    parser.add_argument('--gamma_schedule_type', type=str, default='linear',
+                       choices=['linear', 'quadratic', 'sqrt', 'cosine', 'exponential'],
+                       help='Schedule curve type for timestep gamma interpolation (default: linear)')
     parser.add_argument("--attn_layer", type=str, default='6,7,8,9,10,11', help='injection attention feature layers')
     parser.add_argument('--model_config', type=str, default='models/ldm/stable-diffusion-v1/v1-inference.yaml', help='model config')
     parser.add_argument('--precomputed', type=str, default='./precomputed_feats', help='save path for precomputed feature')
@@ -179,6 +186,9 @@ def main():
                         help='Comma-separated per-layer ControlNet scales at the last denoising '
                              'timestep. Must be the same length as --cn_start_scale_per_layer. '
                              'When omitted, start scales are used uniformly across all timesteps.')
+    parser.add_argument('--cn_schedule_type', type=str, default='linear',
+                        choices=['linear', 'quadratic', 'sqrt', 'cosine', 'exponential'],
+                        help='Schedule curve type for ControlNet per-layer scale interpolation (default: linear)')
     # ===== END CONTROLNET =====
 
     opt = parser.parse_args()
@@ -216,7 +226,7 @@ def main():
             print("\n" + "=" * 45)
             print("Layer-wise Gamma Configuration:")
             for i, gamma in enumerate(gamma_list):
-                print(f"  Layer {6 + i}: {gamma:.2f}")
+                print(f"  Layer {6 + i}: {gamma}")
             print("=" * 45 + "\n")
         except Exception as e:
             print(f"Error parsing --gamma_per_layer: {e}")
@@ -232,11 +242,13 @@ def main():
             parser.error("--gamma_start and --gamma_end are required when --use_timestep_gamma is set")
         if not (0.0 <= opt.gamma_start <= 1.0 and 0.0 <= opt.gamma_end <= 1.0):
             parser.error("--gamma_start and --gamma_end must both be between 0.0 and 1.0")
-        opt.gamma_timestep_schedule = np.linspace(opt.gamma_start, opt.gamma_end, 50).tolist()
+        from schedule_utils import make_schedule
+        opt.gamma_timestep_schedule = make_schedule(opt.gamma_start, opt.gamma_end, 50, opt.gamma_schedule_type)
         print("\n" + "=" * 45)
-        print("Timestep Gamma Schedule (linear):")
-        print(f"  Step  0 (high noise): {opt.gamma_start:.4f}")
-        print(f"  Step 49 (low noise):  {opt.gamma_end:.4f}")
+        print(f"Timestep Gamma Schedule ({opt.gamma_schedule_type}):")
+        for step in range(0, 50, 5):
+            print(f"  Step {step:2d}: {opt.gamma_timestep_schedule[step]:.4f}")
+        print(f"  Step 49: {opt.gamma_timestep_schedule[49]:.4f}")
         print("=" * 45 + "\n")
     else:
         opt.gamma_timestep_schedule = None
@@ -428,6 +440,7 @@ def main():
                     text_embeddings=uc,
                     start_scale_per_layer=opt.cn_start_scale_list,
                     end_scale_per_layer=opt.cn_end_scale_list,
+                    schedule_type=opt.cn_schedule_type,
                 )
             # ===== END CONTROLNET =====
 
